@@ -1,12 +1,6 @@
 {{ template "header.html" . }}
 
-<a href="/">Back to Agents List</a>
-
-<style>
-    td {
-        padding: 5px
-    }
-</style>
+<a href="/" style="display: inline-block; margin-bottom: 20px; padding: 10px 20px; background: #f0f0f0; border-radius: 6px; color: #667eea; font-weight: 600;">← Back to Agents List</a>
 
 <link rel="stylesheet"
       href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/11.1.0/styles/default.min.css">
@@ -15,107 +9,111 @@
 
 <hr/>
 
-<table>
-    <tr>
-        <td valign="top">
-            <h3>Agent</h3>
-            <table border="1" style="border-collapse: collapse">
-                <tr>
-                    <td>Instance ID:</td><td>{{ .InstanceIdStr }}</td>
-                </tr>
-                {{if .Status.Health }}
-                <tr>
-                    <td>Up:</td><td>{{ .Status.Health.Healthy }}</td>
-                </tr>
-                {{if .Status.Health.LastError }}
-                <tr>
-                    <td></td><td><span style="color:red">{{ .Status.Health.LastError }}</span></td>
-                </tr>
-                {{end}}
-                {{if .Status.Health.Healthy }}
-                <tr>
-                    <td>Up since:</td><td>{{ .StartedAt }}</td>
-                </tr>
-                {{end}}
-                {{end}}
-            </table>
-        </td>
-        <td valign="top">
-            <h3>Attributes</h3>
-            <table border="1" style="border-collapse: collapse">
-                {{ range .Status.AgentDescription.IdentifyingAttributes }}
-                </tr>
-                <td>{{ .Key }}</td><td>{{ .Value }}</td>
-                </tr>
-                {{ end }}
-                {{ range .Status.AgentDescription.NonIdentifyingAttributes }}
-                </tr>
-                <td>{{ .Key }}</td><td>{{ .Value }}</td>
-                </tr>
-                {{ end }}
-            </table>
-        </td>
-    </tr>
-</table>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0;">
+    <div>
+        <h3>Agent</h3>
+        <table>
+            <tr>
+                <td><strong>Instance ID:</strong></td><td>{{ .InstanceIdStr }}</td>
+            </tr>
+            {{if .Status.Health }}
+            <tr>
+                <td><strong>Status:</strong></td>
+                <td>
+                    {{if .Status.Health.Healthy }}
+                    <span style="color: #27ae60; font-weight: 600;">✓ Healthy</span>
+                    {{else}}
+                    <span style="color: #e74c3c; font-weight: 600;">✗ Unhealthy</span>
+                    {{end}}
+                </td>
+            </tr>
+            {{if .Status.Health.LastError }}
+            <tr>
+                <td></td><td><span class="error">{{ .Status.Health.LastError }}</span></td>
+            </tr>
+            {{end}}
+            {{if .Status.Health.Healthy }}
+            <tr>
+                <td><strong>Up since:</strong></td><td>{{ .StartedAt }}</td>
+            </tr>
+            {{end}}
+            {{end}}
+        </table>
+    </div>
+    <div>
+        <h3>Attributes</h3>
+        <table>
+            {{ range .Status.AgentDescription.IdentifyingAttributes }}
+            <tr>
+                <td><strong>{{ .Key }}:</strong></td><td>{{ .Value }}</td>
+            </tr>
+            {{ end }}
+            {{ range .Status.AgentDescription.NonIdentifyingAttributes }}
+            <tr>
+                <td><strong>{{ .Key }}:</strong></td><td>{{ .Value }}</td>
+            </tr>
+            {{ end }}
+        </table>
+    </div>
+</div>
 
 <hr/>
 
 <h3>Configuration</h3>
-<table width="100%">
-    <tr>
-        <td valign="top">
-            Current Effective Configuration:<br/>
-            <pre><code class="language-yaml">{{ .EffectiveConfig }}</code></pre>
-        </td>
-        <td valign="top">
-            Additional Configuration:<br/>
-            <form action="/save_config" method="post">
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0;">
+    <div>
+        <h4 style="color: #667eea; margin-bottom: 10px;">Current Effective Configuration</h4>
+        <pre><code class="language-yaml">{{ .EffectiveConfig }}</code></pre>
+    </div>
+    <div>
+        <h4 style="color: #667eea; margin-bottom: 10px;">Additional Configuration</h4>
+        <form action="/save_config" method="post">
             <input type="hidden" name="instanceid" value="{{ .InstanceIdStr }}"/>
-            <textarea cols="40" rows="20" name="config">{{ .CustomInstanceConfig }}</textarea><br/>
-             {{if .Status.RemoteConfigStatus }}
+            <textarea rows="20" name="config" style="font-size: 0.9em;">{{ .CustomInstanceConfig }}</textarea>
+            {{if .Status.RemoteConfigStatus }}
                 {{if .Status.RemoteConfigStatus.ErrorMessage }}
-                <span style="color:red">Failed: {{ .Status.RemoteConfigStatus.ErrorMessage }}</span><br/>
+                <div style="margin-top: 10px;">
+                    <span class="error">Failed: {{ .Status.RemoteConfigStatus.ErrorMessage }}</span>
+                </div>
                 {{end}}
-             {{end}}
-            <input type="submit" value="Save and Send to Agent"/>
-            </form>
-        </td>
-    </tr>
-</table>
+            {{end}}
+            <input type="submit" value="Save and Send to Agent" style="margin-top: 15px;"/>
+        </form>
+    </div>
+</div>
 
 <hr/>
 
 <h3>Client Certificate</h3>
 
-<table border="1" style="border-collapse: collapse">
+<table>
     {{if .ClientCert}}
     <tr>
-        <td>Subject:</td><td>{{ .ClientCert.Subject }}</td>
+        <td><strong>Subject:</strong></td><td>{{ .ClientCert.Subject }}</td>
     </tr>
     <tr>
-        <td>Not Valid Before:</td><td>{{ .ClientCert.NotBefore }}</td>
+        <td><strong>Not Valid Before:</strong></td><td>{{ .ClientCert.NotBefore }}</td>
     </tr>
     <tr>
-        <td>Not Valid After:</td><td>{{ .ClientCert.NotAfter }}</td>
+        <td><strong>Not Valid After:</strong></td><td>{{ .ClientCert.NotAfter }}</td>
     </tr>
     <tr>
-        <td>SHA256 Fingerprint:</td><td>{{ .ClientCertSha256Fingerprint }}</td>
+        <td><strong>SHA256 Fingerprint:</strong></td><td style="font-family: monospace; font-size: 0.9em;">{{ .ClientCertSha256Fingerprint }}</td>
     </tr>
     {{else}}
     <tr>
-        <td><span style="color:red">Client did not supply a certificate.</span></td>
+        <td><span class="error">Client did not supply a certificate.</span></td>
     </tr>
     {{end}}
 </table>
 
 {{if .ClientCertOfferError }}
-<br/>
-<span style="color:red">Cannot apply offered certificate: {{ .ClientCertOfferError }}</span>
-<br/>
+<div style="margin: 15px 0; padding: 12px; background: #fee; border-left: 4px solid #e74c3c; border-radius: 4px;">
+    <span class="error">Cannot apply offered certificate: {{ .ClientCertOfferError }}</span>
+</div>
 {{end}}
 
-<br/>
-<form action="/rotate_client_cert" method="post">
+<form action="/rotate_client_cert" method="post" style="margin-top: 20px;">
     <input type="hidden" name="instanceid" value="{{ .InstanceIdStr }}"/>
     {{if .ClientCert}}
     <input type="submit" value="Rotate Client Certificate"/>
@@ -126,24 +124,39 @@
 
 <h3>OpAMP Connection Settings</h3>
 
-<br/>
-
-<form action="/opamp_connection_settings" method="post">
+<form action="/opamp_connection_settings" method="post" style="margin-top: 20px;">
     <input type="hidden" name="instanceid" value="{{ .InstanceIdStr }}"/>
-    <input type="radio" name="tls_min" value="TLSv1.0">
-      <label for="TLSv1.0">TLSv1.0</label><br/>
-    <input type="radio" name="tls_min" value="TLSv1.1">
-      <label for="TLSv1.1">TLSv1.1</label><br/>
-    <input type="radio" name="tls_min" value="TLSv1.2">
-      <label for="TLSv1.2">TLSv1.2</label><br/>
-    <input type="radio" name="tls_min" value="TLSv1.3">
-      <label for="TLSv1.3">TLSv1.3</label><br/>
 
-    <label for="proxy_url">Proxy URL:</label>
-      <input type="text" id="proxy_url" name="proxy_url"><br/>
+    <div style="margin-bottom: 20px;">
+        <h4 style="color: #667eea; margin-bottom: 10px; font-size: 1.1em;">Minimum TLS Version</h4>
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; max-width: 400px;">
+            <div>
+                <input type="radio" id="tls10" name="tls_min" value="TLSv1.0">
+                <label for="tls10">TLSv1.0</label>
+            </div>
+            <div>
+                <input type="radio" id="tls11" name="tls_min" value="TLSv1.1">
+                <label for="tls11">TLSv1.1</label>
+            </div>
+            <div>
+                <input type="radio" id="tls12" name="tls_min" value="TLSv1.2">
+                <label for="tls12">TLSv1.2</label>
+            </div>
+            <div>
+                <input type="radio" id="tls13" name="tls_min" value="TLSv1.3">
+                <label for="tls13">TLSv1.3</label>
+            </div>
+        </div>
+    </div>
 
-    <input type="submit" value="Set connection settings"/>
+    <div style="margin-bottom: 20px;">
+        <label for="proxy_url" style="display: block; margin-bottom: 8px; font-weight: 600;">Proxy URL:</label>
+        <input type="text" id="proxy_url" name="proxy_url" style="max-width: 500px;" placeholder="http://proxy.example.com:8080">
+    </div>
+
+    <input type="submit" value="Set Connection Settings"/>
 </form>
 
+</div>
 </body>
 </html>

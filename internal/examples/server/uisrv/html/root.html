@@ -2,22 +2,43 @@
 
 <h2>Agents</h2>
 
-<style>
-    td {
-        padding: 5px
-    }
-</style>
-
-<table width=100% border="1" style="border-collapse: collapse">
-    <tr>
-        <th>Instance ID</th>
-    </tr>
+<table>
+    <thead>
+        <tr>
+            <th>Instance ID</th>
+            <th>Identifying Attributes</th>
+            <th>Non-Identifying Attributes</th>
+        </tr>
+    </thead>
+    <tbody>
 {{ range . }}
-    <tr>
-        <td><a href="agent?instanceid={{ .InstanceIdStr }}">{{ .InstanceIdStr }}</a></td>
-    </tr>
+        <tr>
+            <td><a href="agent?instanceid={{ .InstanceIdStr }}">{{ .InstanceIdStr }}</a></td>
+            <td>
+                <table style="box-shadow: none; margin: 0;">
+                    {{ range .Status.AgentDescription.IdentifyingAttributes }}
+                    <tr>
+                        <td style="border: none;"><strong>{{ .Key }}:</strong></td>
+                        <td style="border: none;">{{ .Value }}</td>
+                    </tr>
+                    {{ end }}
+                </table>
+            </td>
+            <td>
+                <table style="box-shadow: none; margin: 0;">
+                    {{ range .Status.AgentDescription.NonIdentifyingAttributes }}
+                    <tr>
+                        <td style="border: none;"><strong>{{ .Key }}:</strong></td>
+                        <td style="border: none;">{{ .Value }}</td>
+                    </tr>
+                    {{ end }}
+                </table>
+            </td>
+        </tr>
 {{ end }}
+    </tbody>
 </table>
 
+</div>
 </body>
 </html>
