@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,8 +18,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"google.golang.org/protobuf/proto"
 
+	clienttypes "github.com/open-telemetry/opamp-go/client/types"
 	sharedinternal "github.com/open-telemetry/opamp-go/internal"
 	"github.com/open-telemetry/opamp-go/internal/testhelpers"
 	"github.com/open-telemetry/opamp-go/protobufs"
@@ -25,10 +29,14 @@ import (
 )
 
 func startServer(t *testing.T, settings *StartSettings) *server {
-	srv := New(&sharedinternal.NopLogger{})
+	return startServerWithLogger(t, settings, &sharedinternal.NopLogger{})
+}
+
+func startServerWithLogger(t *testing.T, settings *StartSettings, logger clienttypes.Logger) *server {
+	srv := New(logger)
 	require.NotNil(t, srv)
 	if settings.ListenEndpoint == "" {
-		// Find an avaiable port to listne on.
+		// Find an avaiable port to listen on.
 		settings.ListenEndpoint = testhelpers.GetAvailableLocalAddress()
 	}
 	if settings.ListenPath == "" {
@@ -55,6 +63,36 @@ func TestServerStartStop(t *testing.T) {
 
 	err = srv.Stop(context.Background())
 	assert.NoError(t, err)
+}
+
+func TestServerStartStopWithCancel(t *testing.T) {
+	srv := startServer(t, &StartSettings{})
+
+	err := srv.Start(StartSettings{})
+	assert.ErrorIs(t, err, errAlreadyStarted)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = srv.Stop(canceledCtx)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestServerStartStopIdempotency(t *testing.T) {
+	endpoint := testhelpers.GetAvailableLocalAddress()
+	for i := 0; i < 10; i++ {
+		t.Run(fmt.Sprintf("Attempt #%d: ", i), func(t *testing.T) {
+			srv := startServer(t, &StartSettings{
+				ListenEndpoint: endpoint,
+			})
+
+			err := srv.Start(StartSettings{})
+			assert.ErrorIs(t, err, errAlreadyStarted)
+
+			err = srv.Stop(context.Background())
+			assert.NoError(t, err)
+		})
+	}
 }
 
 func TestServerStartStopWithMiddleware(t *testing.T) {
@@ -209,7 +247,7 @@ func TestDisconnectHttpConnection(t *testing.T) {
 	assert.Equal(t, ErrInvalidHTTPConnection, err)
 }
 
-func TestDisconnectWSConnection(t *testing.T) {
+func TestDisconnectClientWSConnection(t *testing.T) {
 	connectionCloseCalled := int32(0)
 	callback := types.Callbacks{
 		OnConnecting: func(request *http.Request) types.ConnectionResponse {
@@ -233,9 +271,9 @@ func TestDisconnectWSConnection(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, atomic.LoadInt32(&connectionCloseCalled) == 0)
 
-	// Close connection from server side
-	srvConn := wsConnection{wsConn: conn}
-	err = srvConn.Disconnect()
+	// Close connection from client side
+	clientConn := newWSConnection(conn)
+	err = clientConn.Disconnect()
 	assert.NoError(t, err)
 
 	// Verify connection disconnected from server side
@@ -245,6 +283,78 @@ func TestDisconnectWSConnection(t *testing.T) {
 		_, _, err := conn.ReadMessage()
 		return err != nil
 	})
+}
+
+// testLogger is a struct that adapts a *zap.Logger to opamp-go's Logger interface.
+type testLogger struct {
+	errorLogs []string
+	debugLogs []string
+}
+
+func newTestLogger() *testLogger {
+	return &testLogger{
+		errorLogs: []string{},
+		debugLogs: []string{},
+	}
+}
+
+func (o *testLogger) Debugf(_ context.Context, format string, v ...any) {
+	log := fmt.Sprintf(format, v...)
+	o.debugLogs = append(o.debugLogs, fmt.Sprintf("Debugf: %s\n", log))
+}
+
+func (o *testLogger) Errorf(_ context.Context, format string, v ...any) {
+	log := fmt.Sprintf(format, v...)
+	o.errorLogs = append(o.errorLogs, fmt.Sprintf("Errorf: %s\n", log))
+}
+
+func TestDisconnectServerWSConnection(t *testing.T) {
+	connectionCloseCalled := int32(0)
+	var serverConn types.Connection
+	connReady := make(chan struct{}) // Channel to signal when serverConn is assigned
+	callback := types.Callbacks{
+		OnConnecting: func(request *http.Request) types.ConnectionResponse {
+			return types.ConnectionResponse{Accept: true, ConnectionCallbacks: types.ConnectionCallbacks{
+				OnConnected: func(ctx context.Context, conn types.Connection) {
+					serverConn = conn
+					close(connReady)
+				},
+				OnConnectionClose: func(conn types.Connection) {
+					atomic.StoreInt32(&connectionCloseCalled, 1)
+				},
+			}}
+		},
+	}
+
+	// Start a Server.
+	logger := newTestLogger()
+	settings := &StartSettings{Settings: Settings{Callbacks: callback}}
+	srv := startServerWithLogger(t, settings, logger)
+	defer srv.Stop(context.Background())
+
+	// Connect to the Server.
+	conn, _, err := dialClient(settings)
+
+	// Verify that the connection is successful.
+	assert.NoError(t, err)
+	assert.True(t, atomic.LoadInt32(&connectionCloseCalled) == 0)
+
+	// Wait for serverConn to be assigned
+	<-connReady
+
+	// Close connection from server side
+	serverConn.Disconnect()
+
+	// Verify connection disconnected from server side
+	eventually(t, func() bool { return atomic.LoadInt32(&connectionCloseCalled) == 1 })
+	// Waiting for wsConnection to fail ReadMessage() over a Disconnected communication
+	eventually(t, func() bool {
+		_, _, err := conn.ReadMessage()
+		return err != nil
+	})
+
+	// We expect exactly one error log
+	require.Equal(t, 1, len(logger.errorLogs))
 }
 
 var testInstanceUid = []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6}
@@ -313,6 +423,110 @@ func TestServerReceiveSendMessage(t *testing.T) {
 	assert.EqualValues(t, sendMsg.InstanceUid, response.InstanceUid)
 	assert.EqualValues(t, protobufs.ServerCapabilities_ServerCapabilities_AcceptsStatus, response.Capabilities)
 	assert.EqualValues(t, settings.CustomCapabilities, response.CustomCapabilities.Capabilities)
+}
+
+func TestServerReceiveSendErrorMessage(t *testing.T) {
+	var rcvMsg atomic.Value
+	type ErrorInfo struct {
+		mt      int
+		msgByte []byte
+		err     error
+	}
+	callbacks := types.Callbacks{
+		OnConnecting: func(request *http.Request) types.ConnectionResponse {
+			return types.ConnectionResponse{Accept: true, ConnectionCallbacks: types.ConnectionCallbacks{
+				OnReadMessageError: func(conn types.Connection, mt int, msgByte []byte, err error) {
+					rcvMsg.Store(ErrorInfo{
+						mt:      mt,
+						msgByte: msgByte,
+						err:     err,
+					})
+				},
+			}}
+		},
+	}
+
+	// Start a Server.
+	settings := &StartSettings{Settings: Settings{
+		Callbacks:          callbacks,
+		CustomCapabilities: []string{"local.test.capability"},
+	}}
+	srv := startServer(t, settings)
+	defer srv.Stop(context.Background())
+
+	// Connect using a WebSocket client.
+	conn, _, _ := dialClient(settings)
+	require.NotNil(t, conn)
+	defer conn.Close()
+
+	// Send an invalid message to the Server. This should result in calling OnReadMessageError().
+	err := conn.WriteMessage(websocket.TextMessage, []byte("abc"))
+	require.NoError(t, err)
+
+	// Wait until Server receives the message.
+	eventually(t, func() bool { return rcvMsg.Load() != nil })
+	errInfo := rcvMsg.Load().(ErrorInfo)
+	assert.EqualValues(t, websocket.TextMessage, errInfo.mt)
+	assert.EqualValues(t, []byte("abc"), errInfo.msgByte)
+	assert.NotNil(t, errInfo.err)
+}
+
+func TestServerOnMessageResponseError(t *testing.T) {
+	var conn *websocket.Conn
+	var rcvMsg atomic.Value
+	var onMessageResponseErrorCalled atomic.Bool
+	callbacks := types.Callbacks{
+		OnConnecting: func(request *http.Request) types.ConnectionResponse {
+			return types.ConnectionResponse{Accept: true, ConnectionCallbacks: types.ConnectionCallbacks{
+				OnMessage: func(ctx context.Context, conn types.Connection, message *protobufs.AgentToServer) *protobufs.ServerToAgent {
+					// Remember received message.
+					rcvMsg.Store(message)
+
+					// Create a response.
+					response := protobufs.ServerToAgent{
+						InstanceUid:  message.InstanceUid,
+						Capabilities: uint64(protobufs.ServerCapabilities_ServerCapabilities_AcceptsStatus),
+					}
+
+					// Close connection to trigger OnMessageResponseError.
+					conn.Disconnect()
+					return &response
+				},
+				OnMessageResponseError: func(conn types.Connection, response *protobufs.ServerToAgent, err error) {
+					onMessageResponseErrorCalled.Store(true)
+				},
+			}}
+		},
+	}
+
+	settings := &StartSettings{Settings: Settings{
+		Callbacks:          callbacks,
+		CustomCapabilities: []string{"local.test.capability"},
+	}}
+	srv := startServer(t, settings)
+	defer srv.Stop(context.Background())
+
+	// Connect using a WebSocket client.
+	conn, _, _ = dialClient(settings)
+	require.NotNil(t, conn)
+	defer conn.Close()
+
+	// Send a message to the Server.
+	sendMsg := protobufs.AgentToServer{
+		InstanceUid: testInstanceUid,
+	}
+	bytes, err := proto.Marshal(&sendMsg)
+	require.NoError(t, err)
+	err = conn.WriteMessage(websocket.BinaryMessage, bytes)
+	require.NoError(t, err)
+
+	// Wait until Server receives the message.
+	eventually(t, func() bool { return rcvMsg.Load() != nil })
+	assert.True(t, proto.Equal(rcvMsg.Load().(proto.Message), &sendMsg))
+
+	// Wait until OnMessageResponseError is called and verify it was called.
+	eventually(t, func() bool { return onMessageResponseErrorCalled.Load() })
+	assert.True(t, onMessageResponseErrorCalled.Load())
 }
 
 func TestServerReceiveSendMessageWithCompression(t *testing.T) {
@@ -620,7 +834,6 @@ func TestServerAttachSendMessagePlainHTTP(t *testing.T) {
 }
 
 func TestServerHonoursClientRequestContentEncoding(t *testing.T) {
-
 	hc := http.Client{}
 	var rcvMsg atomic.Value
 	var onConnectedCalled, onCloseCalled int32
@@ -698,7 +911,6 @@ func TestServerHonoursClientRequestContentEncoding(t *testing.T) {
 }
 
 func TestServerHonoursAcceptEncoding(t *testing.T) {
-
 	hc := http.Client{}
 	var rcvMsg atomic.Value
 	var onConnectedCalled, onCloseCalled int32
@@ -985,7 +1197,6 @@ func BenchmarkSendToClient(b *testing.B) {
 	}
 	srv := New(&sharedinternal.NopLogger{})
 	err := srv.Start(*settings)
-
 	if err != nil {
 		b.Error(err)
 	}
@@ -1017,7 +1228,6 @@ func BenchmarkSendToClient(b *testing.B) {
 
 	for _, conn := range serverConnections {
 		err := conn.Send(context.Background(), &protobufs.ServerToAgent{})
-
 		if err != nil {
 			b.Error(err)
 		}
@@ -1026,5 +1236,163 @@ func BenchmarkSendToClient(b *testing.B) {
 	for _, conn := range clientConnections {
 		conn.Close()
 	}
+}
 
+func TestServerNotResponse(t *testing.T) {
+	var (
+		rcvMsg  atomic.Value
+		srvConn atomic.Value
+	)
+	callbacks := types.Callbacks{
+		OnConnecting: func(request *http.Request) types.ConnectionResponse {
+			return types.ConnectionResponse{Accept: true, ConnectionCallbacks: types.ConnectionCallbacks{
+				OnMessage: func(ctx context.Context, conn types.Connection, message *protobufs.AgentToServer) *protobufs.ServerToAgent {
+					srvConn.Store(conn.Connection())
+					// Remember received message.
+					rcvMsg.Store(message)
+					return nil
+				},
+			}}
+		},
+	}
+
+	// Start a Server.
+	settings := &StartSettings{Settings: Settings{
+		Callbacks: callbacks,
+	}}
+	srv := startServer(t, settings)
+	defer srv.Stop(context.Background())
+
+	// Test HTTP Request
+	// Send a message to the Server.
+	sendMsg := protobufs.AgentToServer{
+		InstanceUid: testInstanceUid,
+	}
+	b, err := proto.Marshal(&sendMsg)
+	require.NoError(t, err)
+	resp, err := http.Post("http://"+settings.ListenEndpoint+settings.ListenPath, contentTypeProtobuf, bytes.NewReader(b))
+	require.NoError(t, err)
+
+	// Wait until Server receives the message.
+	eventually(t, func() bool { return rcvMsg.Load() != nil })
+
+	// Verify the received message is what was sent.
+	assert.True(t, proto.Equal(rcvMsg.Load().(proto.Message), &sendMsg))
+
+	// Read Server's response.
+	b, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.EqualValues(t, http.StatusOK, resp.StatusCode)
+	assert.EqualValues(t, contentTypeProtobuf, resp.Header.Get(headerContentType))
+
+	// Decode the response.
+	var response protobufs.ServerToAgent
+	err = proto.Unmarshal(b, &response)
+	require.NoError(t, err)
+
+	// Verify the response.
+	assert.EqualValues(t, sendMsg.InstanceUid, response.InstanceUid)
+
+	// Test WebSocket
+	// Connect using a WebSocket client.
+	conn, _, _ := dialClient(settings)
+	require.NotNil(t, conn)
+	defer conn.Close()
+
+	testInstanceUid2 := []byte{9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6}
+	// Send a message to the Server.
+	sendMsg = protobufs.AgentToServer{
+		InstanceUid: testInstanceUid2,
+	}
+	bytes, err := proto.Marshal(&sendMsg)
+	require.NoError(t, err)
+	err = conn.WriteMessage(websocket.BinaryMessage, bytes)
+	require.NoError(t, err)
+
+	// Wait until Server receives the message.
+	eventually(t, func() bool { return rcvMsg.Load() != nil })
+	assert.True(t, proto.Equal(rcvMsg.Load().(proto.Message), &sendMsg))
+	require.NoError(t, srvConn.Load().(net.Conn).Close())
+
+	// Read Server's response.
+	_, _, err = conn.ReadMessage()
+	require.True(t, websocket.IsCloseError(err, websocket.CloseAbnormalClosure))
+}
+
+func TestServerTLS(t *testing.T) {
+	var rcvMsg atomic.Value
+	var onConnectedCalled, onCloseCalled int32
+	callbacks := types.Callbacks{
+		OnConnecting: func(request *http.Request) types.ConnectionResponse {
+			return types.ConnectionResponse{Accept: true, ConnectionCallbacks: types.ConnectionCallbacks{
+				OnConnected: func(ctx context.Context, conn types.Connection) {
+					atomic.StoreInt32(&onConnectedCalled, 1)
+				},
+				OnMessage: func(ctx context.Context, conn types.Connection, message *protobufs.AgentToServer) *protobufs.ServerToAgent {
+					// Remember received message.
+					rcvMsg.Store(message)
+
+					// Send a response.
+					response := protobufs.ServerToAgent{
+						InstanceUid:  message.InstanceUid,
+						Capabilities: uint64(protobufs.ServerCapabilities_ServerCapabilities_AcceptsStatus),
+					}
+					return &response
+				},
+				OnConnectionClose: func(conn types.Connection) {
+					atomic.StoreInt32(&onCloseCalled, 1)
+				},
+			}}
+		},
+	}
+
+	// Start a Server.
+	srvTLSConfig, err := sharedinternal.CreateServerTLSConfig(
+		"../internal/certs/certs/ca.cert.pem",
+		"../internal/certs/server_certs/server.cert.pem",
+		"../internal/certs/server_certs/server.key.pem",
+	)
+	require.NoError(t, err)
+	settings := &StartSettings{Settings: Settings{Callbacks: callbacks}, TLSConfig: srvTLSConfig}
+	srv := startServer(t, settings)
+	defer srv.Stop(context.Background())
+
+	// Send a message to the Server.
+	sendMsg := protobufs.AgentToServer{
+		InstanceUid: []byte("12345678"),
+	}
+	b, err := proto.Marshal(&sendMsg)
+	require.NoError(t, err)
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	hc := &http.Client{Transport: tr}
+	resp, err := hc.Post("https://"+settings.ListenEndpoint+settings.ListenPath, contentTypeProtobuf, bytes.NewReader(b))
+	require.NoError(t, err)
+
+	// Wait until Server receives the message.
+	eventually(t, func() bool { return rcvMsg.Load() != nil })
+	assert.True(t, atomic.LoadInt32(&onConnectedCalled) == 1)
+
+	// Verify the received message is what was sent.
+	assert.True(t, proto.Equal(rcvMsg.Load().(proto.Message), &sendMsg))
+
+	// Read Server's response.
+	b, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.EqualValues(t, http.StatusOK, resp.StatusCode)
+	assert.EqualValues(t, contentTypeProtobuf, resp.Header.Get(headerContentType))
+
+	// Decode the response.
+	var response protobufs.ServerToAgent
+	err = proto.Unmarshal(b, &response)
+	require.NoError(t, err)
+
+	// Verify the response.
+	assert.EqualValues(t, sendMsg.InstanceUid, response.InstanceUid)
+	assert.EqualValues(t, protobufs.ServerCapabilities_ServerCapabilities_AcceptsStatus, response.Capabilities)
+
+	eventually(t, func() bool { return atomic.LoadInt32(&onCloseCalled) == 1 })
 }

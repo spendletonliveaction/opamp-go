@@ -54,14 +54,22 @@ type ConnectionCallbacks struct {
 	OnConnected func(ctx context.Context, conn Connection)
 
 	// OnMessage is called when a message is received from the connection. Can happen
-	// only after OnConnected(). Must return a ServerToAgent message that will be sent
-	// as a response to the Agent.
+	// only after OnConnected().
+	// When the returned ServerToAgent message is nil, WebSocket will not send a
+	// message to the Agent, and the HTTP request will respond to an empty message.
+	// If the return is not nil it will be sent as a response to the Agent.
 	// For plain HTTP requests once OnMessage returns and the response is sent
 	// to the Agent the OnConnectionClose message will be called immediately.
 	OnMessage func(ctx context.Context, conn Connection, message *protobufs.AgentToServer) *protobufs.ServerToAgent
 
 	// OnConnectionClose is called when the OpAMP connection is closed.
 	OnConnectionClose func(conn Connection)
+
+	// OnReadMessageError is called when an error occurs while reading or deserializing a message.
+	OnReadMessageError func(conn Connection, mt int, msgByte []byte, err error)
+
+	// OnMessageResponseError is called when an error occurs while sending the response message from the OnMessage loop.
+	OnMessageResponseError func(conn Connection, message *protobufs.ServerToAgent, err error)
 }
 
 func defaultOnConnected(ctx context.Context, conn Connection) {}
@@ -77,6 +85,10 @@ func defaultOnMessage(
 
 func defaultOnConnectionClose(conn Connection) {}
 
+func defaultOnReadMessageError(conn Connection, mt int, msgByte []byte, err error) {}
+
+func defaultOnSendMessageError(conn Connection, message *protobufs.ServerToAgent, err error) {}
+
 func (c *ConnectionCallbacks) SetDefaults() {
 	if c.OnConnected == nil {
 		c.OnConnected = defaultOnConnected
@@ -88,5 +100,13 @@ func (c *ConnectionCallbacks) SetDefaults() {
 
 	if c.OnConnectionClose == nil {
 		c.OnConnectionClose = defaultOnConnectionClose
+	}
+
+	if c.OnReadMessageError == nil {
+		c.OnReadMessageError = defaultOnReadMessageError
+	}
+
+	if c.OnMessageResponseError == nil {
+		c.OnMessageResponseError = defaultOnSendMessageError
 	}
 }
